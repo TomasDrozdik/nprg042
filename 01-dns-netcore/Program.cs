@@ -88,7 +88,8 @@ namespace dns_netcore
 				"www.seznam.cz",
 				"www.google.com",
 			});
-			var resolver = new SerialRecursiveResolver(client);
+			//var resolver = new SerialRecursiveResolver(client);
+			var resolver = new RecursiveResolver(client);
 
 			Console.WriteLine("Total {0} logical processors detected.", Environment.ProcessorCount);
 			Console.WriteLine("Warming up thread pool...");
