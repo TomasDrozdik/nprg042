@@ -60,8 +60,8 @@ namespace dns_netcore
 			public override string ToString() => $"ParsedDomain: domains({String.Join('.', domains)}), index({index})";
 
 			// Equals considers domains[0..index] range
-            public override bool Equals(object obj)
-            {
+			public override bool Equals(object obj)
+			{
 				Debug.Assert(index >= 0 && index < domains.Length);
 				if (!(obj is ParsedDomain)) {
 					return false;
@@ -76,18 +76,18 @@ namespace dns_netcore
 					}
 				}
 				return true;
-            }
+			}
 
 			// GetHashCode considers domains[0..index] range
-            public override int GetHashCode()
-            {
+			public override int GetHashCode()
+			{
 				Debug.Assert(index >= 0 && index < domains.Length);
 				int hash = index;
 				for (int i = index; i >- 0; --i) {
 					hash = HashCode.Combine(domains[i].GetHashCode(), hash);
 				}
 				return hash;
-            }
+			}
 		}
 
 		private IDNSClient dnsClient;
@@ -138,11 +138,14 @@ namespace dns_netcore
 			IP4Addr cachedIP;
 			var hasCachedIP = resolvedCache.TryGetValue(parsedDomain, out cachedIP);
 			if (hasCachedIP) {
-				var reversedDomain = await dnsClient.Reverse(cachedIP);
-				if (reversedDomain == parsedDomain.GetThisLevelSubdomain()) {
-					return cachedIP;
+				try {
+					var reversedDomain = await dnsClient.Reverse(cachedIP);
+					if (reversedDomain == parsedDomain.GetThisLevelSubdomain()) {
+						return cachedIP;
+					}
+				} catch (DNSClientException) {
+					// If the cached value is no loger valid continue and let this resolver resolve it again.
 				}
-				// If the cached value is no loger valid continue and let this resolver resolve it again.
 			}
 
 			// Resolve current domain either as TLD or depend on upper level domain.
