@@ -95,9 +95,7 @@ namespace dns_netcore
 		// Dictionary that maps currently resolving domains to the running tasks.
 		private ConcurrentDictionary<ParsedDomain, Task<IP4Addr>> resolvers;
 
-		// Dictionary that maps already resolved domains to the the results, that may be no loger valid, and need to be
-		// check with DNCClient.Reverse method.
-		private ConcurrentDictionary<ParsedDomain, IP4Addr> resolvedCache;
+		private ConcurrentDictionary<IP4Addr, Task<string>> reversers;
 
 		// Atomic counter used to schedule root servers among resolvers. To obtain next root server index modulo this
 		// with root server count.
@@ -107,7 +105,7 @@ namespace dns_netcore
 		{
 			this.dnsClient = client;
 			this.resolvers = new ConcurrentDictionary<ParsedDomain, Task<IP4Addr>>();
-			this.resolvedCache = new ConcurrentDictionary<ParsedDomain, IP4Addr>();
+			this.reversers = new ConcurrentDictionary<IP4Addr, Task<string>>();
 		}
 
 		public async Task<IP4Addr> ResolveRecursive(string domain)
@@ -118,53 +116,55 @@ namespace dns_netcore
 
 		// Look for a resolver currently resolving this domain.
 		// If there is one just wait for it and return, if there is none create a new one and wait for that one.
-		private async Task<IP4Addr> AssignResolverAndResolve(ParsedDomain parsedDomain)
+		private async Task<IP4Addr> AssignResolverAndResolve(ParsedDomain domain)
 		{
-			// In order to atomically update the resolvers dictionary we have to create a task that would potentially
-			// be a new resolver, don't star the task immediately, because if there is a chaced resolver there is no
-			// need to start new resolver.
-			Task<IP4Addr> potentionalResolver = new Task<IP4Addr>(() => Resolve(parsedDomain).Result);
-			Task<IP4Addr> actualResolver = resolvers.GetOrAdd(parsedDomain, potentionalResolver);
-			if (actualResolver == potentionalResolver) {
-				// GetOrAdd did Add thus there was no cached resovler => start the new task.
-				actualResolver.Start();
-			}
-			return await actualResolver;
-		}
-
-		private async Task<IP4Addr> Resolve(ParsedDomain parsedDomain)
-		{
-			// Check cache.
-			IP4Addr cachedIP;
-			var hasCachedIP = resolvedCache.TryGetValue(parsedDomain, out cachedIP);
-			if (hasCachedIP) {
-				try {
-					var reversedDomain = await dnsClient.Reverse(cachedIP);
-					if (reversedDomain == parsedDomain.GetThisLevelSubdomain()) {
-						return cachedIP;
+			Task<IP4Addr> resolver;
+			var hasResolver = resolvers.TryGetValue(domain, out resolver);
+			if (hasResolver) {
+				if (resolver.Status == TaskStatus.RanToCompletion) {
+					try {
+						var reversed = new ParsedDomain(AsignReverserAndReverse(resolver.Result).Result);
+						if (domain.Equals(reversed)) {
+							// Reverse successful
+							return resolver.Result;
+						}
+					} catch (DNSClientException) {
+						// Reverse unsucessful -> cache is out of date DNSClient.Reverse() did throw -> re-resolve
 					}
-				} catch (DNSClientException) {
-					// If the cached value is no loger valid continue and let this resolver resolve it again.
+					// Reverse unsucessful -> re-resolve this domain and update resolver.
+					resolvers.TryUpdate(domain, Resolve(domain), resolver);
+				} else {
+					// Wait for the running task.
+					return resolver.Result;
 				}
 			}
 
-			// Resolve current domain either as TLD or depend on upper level domain.
-			IP4Addr ip;
-			if (parsedDomain.IsTopLevelDomain()) {
+			resolver = resolvers.GetOrAdd(domain, Resolve(domain));
+			return resolver.Result;
+		}
+
+		private async Task<IP4Addr> Resolve(ParsedDomain domain)
+		{
+			if (domain.IsTopLevelDomain()) {
 				int rootServerIndex = Interlocked.Increment(ref rootServerCounter) % dnsClient.GetRootServers().Count;
 				IP4Addr rootServerIP = dnsClient.GetRootServers()[rootServerIndex];
-				ip = await dnsClient.Resolve(rootServerIP, parsedDomain.GetThisLevelSubdomain());
+				return dnsClient.Resolve(rootServerIP, domain.GetThisLevelSubdomain()).Result;
 			} else {
-				var upperLevelIP = await AssignResolverAndResolve(parsedDomain.GetUpperLevel());
-				ip = await dnsClient.Resolve(upperLevelIP, parsedDomain.GetThisLevelSubdomain());
+				var upperLevelIP = await AssignResolverAndResolve(domain.GetUpperLevel());
+				return dnsClient.Resolve(upperLevelIP, domain.GetThisLevelSubdomain()).Result;
 			}
+		}
 
-			// Update cache and remove itself from resolvers.
-			resolvedCache.AddOrUpdate(parsedDomain, ip, (parsedDomain, oldIP) => oldIP = ip);
-			Task<IP4Addr> thisTaskDummy;
-			bool removeSuccessful = resolvers.Remove(parsedDomain, out thisTaskDummy);
-			Debug.Assert(removeSuccessful);
-			return ip;
+		private async Task<String> AsignReverserAndReverse(IP4Addr ip)
+		{
+			Task<string> reverser;
+			var hasReverser = reversers.TryGetValue(ip, out reverser);
+			if (hasReverser) {
+				return reverser.Result;
+			} else {
+				reverser = reversers.GetOrAdd(ip, dnsClient.Reverse(ip));
+				return reverser.Result;
+			}
 		}
 	}
 }
