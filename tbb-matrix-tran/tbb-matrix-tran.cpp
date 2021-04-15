@@ -1,5 +1,6 @@
 #include "matrix.hpp"
 
+#include <tbb/parallel_for.h>
 #include <tbb/tick_count.h>
 
 #include <random>
@@ -55,12 +56,11 @@ bool verify(const Matrix<T, O> &m1, const Matrix<T, O> &m2)
 template<typename T, class O>
 void parallel_transpose(Matrix<T, O> &matrix)
 {
-
-	/*
-	 * TODO - Fake implementation, replace with real parallel implementation
-	 */
-	
-	serial_transpose(matrix);
+	tbb::parallel_for(std::size_t{0}, matrix.m(), [&](size_t i) {
+		for (std::size_t j = i + 1; j < matrix.n(); ++j) {
+			std::swap(matrix.at(i, j), matrix.at(j, i));
+		}
+	});
 }
 
 
