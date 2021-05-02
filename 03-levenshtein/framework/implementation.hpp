@@ -4,13 +4,14 @@
 #include <interface.hpp>
 #include <exception.hpp>
 
-#include <array>
+#include <vector>
 #include <iostream>
 #include <cassert>
 
 template<typename C = char, typename DIST = std::size_t, bool DEBUG = false>
 class EditDistance : public IEditDistance<C, DIST, DEBUG> {
 private:
+    bool swap = false;
     std::vector<DIST> col;
     std::vector<DIST> row;
     std::vector<DIST> prev_cross_diag;
@@ -56,9 +57,14 @@ public:
 	 */
 	virtual void init(DIST len1, DIST len2)
 	{
+	    if (len1 > len2) {
+	        swap = true;
+	        std::swap(len1, len2);
+	    }
+
+        row.resize(len1 + 1);
 		col.resize(len2 + 1);
-		row.resize(len1 + 1);
-		prev_cross_diag.resize(len2);
+		prev_cross_diag.resize(len2 + 1);
 
 		for (std::size_t i = 0; i < col.size(); ++i) {
 			col[i] = i;
@@ -82,8 +88,24 @@ public:
         assert(str1.size() % block_size == 0);
         assert(str2.size() % block_size == 0);
 
-		const std::size_t block_row_count = str2.size() / block_size;
-        const std::size_t block_col_count = str1.size() / block_size;
+        // Special case (one of the strings is empty).
+        if (str1.size() == 0) {
+            return str2.size();
+        } else if (str2.size() == 0) {
+            return str1.size();
+        }
+
+        // Effectively const
+        std::vector<C> *s1 = &(const_cast<std::vector<C> &>(str1));
+        std::vector<C> *s2 = &(const_cast<std::vector<C> &>(str2));
+
+	    if (s1->size() > s2->size()) {
+	        assert(swap);
+	        std::swap(s1, s2);
+	    }
+
+		const std::size_t block_row_count = s2->size() / block_size;
+        const std::size_t block_col_count = s1->size() / block_size;
 
         for (std::size_t diag = 1; diag < block_row_count + block_col_count; ++diag) {
 
@@ -93,7 +115,7 @@ public:
 
                 std::size_t row_idx = diag - col_idx - 1;
 
-                process_block(row_idx, col_idx, col_idx, str1, str2);
+                process_block(row_idx, col_idx, col_idx, *s1, *s2);
             }
 
             if (diag < block_row_count) {
@@ -105,3 +127,4 @@ public:
 	}
 };
 
+#endif
