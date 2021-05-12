@@ -22,14 +22,14 @@ void serial_blur(const Image<T> &src, Image<T> &dest, int radius = 5)
 
 	int width = (int)src.width();
 	int height = (int)src.height();
-	for (int y = 0; y < height; ++y)
+	for (int y = 0; y < height; ++y) {
 		for (int x = 0; x < width; ++x) {
 			// Process pixel [x,y] ...
 			T sum = (T)0;
 			T weights = (T)0;
 
 			// Computing weighted average of the pixels in the radius...
-			for (int dy = -radius; dy <= radius; ++dy)
+			for (int dy = -radius; dy <= radius; ++dy) {
 				for (int dx = -radius; dx <= radius; ++dx) {
 					int srcX = x + dx;
 					int srcY = y + dy;
@@ -40,11 +40,43 @@ void serial_blur(const Image<T> &src, Image<T> &dest, int radius = 5)
 						sum += srcData[srcY*width + srcX] * weight;
 					}
 				}
+			}
 
 			destData[y*width + x] = sum / weights;
 		}
+	}
 }
 
+template<typename T>
+__global__ void blur_pixel(const T *srcData, T*destData, const size_t width, const size_t height, int radius)
+{
+	int x = blockIdx.x * blockDim.x + threadIdx.x;
+	int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+	if (x >= width || y >= height) {
+		return;
+	}
+
+	// Process pixel [x,y] ...
+	T sum = (T)0;
+	T weights = (T)0;
+
+	// Computing weighted average of the pixels in the radius...
+	for (int dy = -radius; dy <= radius; ++dy) {
+		for (int dx = -radius; dx <= radius; ++dx) {
+			int srcX = x + dx;
+			int srcY = y + dy;
+			if (srcX >= 0 && srcY >= 0 && srcX < width && srcY < height) {
+				int distance = std::abs(dx) + std::abs(dy); // Manhattan distance
+				T weight = (distance > 0) ? 1 / (T)distance : (T)5;
+				weights += weight;
+				sum += srcData[srcY*width + srcX] * weight;
+			}
+		}
+	}
+
+	destData[y*width + x] = sum / weights;
+}
 
 /**
  * CUDA implementation of the blur stencil.
@@ -58,12 +90,25 @@ void cuda_blur(const Image<T> &src, Image<T> &dest, int radius = 5)
 
 	CUCH(cudaSetDevice(0));
 
-	
-	/*
-	 * Your code goes here...
-	 */
+	const T* srcData = src.getRawData();
+	T *dstData = dest.getRawData();
+	std::size_t n = src.size();
 
+	T *cuSrcData{};
+	T *cuDstData{};
+	CUCH(cudaMalloc(&cuSrcData, n * sizeof(T)));
+	CUCH(cudaMalloc(&cuDstData, n * sizeof(T)));
 
+	CUCH(cudaMemcpy(cuSrcData, srcData, n * sizeof(T), cudaMemcpyHostToDevice));
+
+	std::size_t width = src.width();
+	std::size_t height = src.height();
+	const int blockSize = 32;
+	dim3 dimGrid((width + blockSize - 1) / blockSize, (height + blockSize - 1) / blockSize);
+	blur_pixel<<<dimGrid, dim3(blockSize, blockSize)>>>(cuSrcData, cuDstData, width, height, radius);
+
+	CUCH(cudaGetLastError());
+	CUCH(cudaMemcpy(dstData, cuDstData, n * sizeof(T), cudaMemcpyDeviceToHost));
 }
 
 
