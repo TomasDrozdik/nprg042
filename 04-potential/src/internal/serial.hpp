@@ -16,7 +16,7 @@
  * \tparam LEN_T Type in which lengths of edges is represented.
  */
 template<typename F = float, typename IDX_T = std::uint32_t, typename LEN_T = std::uint32_t>
-class SerialSimulator
+class SerialSimulator : public IProgramPotential<F, IDX_T, LEN_T>
 {
 public:
 	typedef F coord_t;		// Type of point coordinates.
@@ -186,6 +186,27 @@ public:
 			points[i].x += mVelocities[i].x * mParams.timeQuantum;
 			points[i].y += mVelocities[i].y * mParams.timeQuantum;
 		}
+	}
+
+	std::vector<point_t> mPoints;
+
+	virtual void initialize(index_t points, const std::vector<edge_t>& edges, const std::vector<length_t> &lengths, index_t iterations)
+	{
+
+	}
+
+	virtual void iteration(std::vector<point_t> &points)
+	{
+		static int iteration = 0;
+		if (iteration++ == 0) {
+			mPoints = points;
+		}
+		updatePoints(mPoints);
+	}
+
+	virtual void getVelocities(std::vector<point_t> &velocities)
+	{
+		velocities = mVelocities;
 	}
 };
 

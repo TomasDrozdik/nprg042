@@ -89,7 +89,6 @@ int main(int argc, char **argv)
 		if (verbose) {
 			std::cout << "Program object preinitialization ... " << std::endl;
 		}
-		IProgramPotential<real_t, index_t, length_t> *program = new ProgramPotential<real_t, index_t, length_t>;
 
 		// Get model parameters from application arguments.
 		ModelParameters<real_t> modelParameters;
@@ -99,8 +98,13 @@ int main(int argc, char **argv)
 		modelParameters.slowdown = (real_t)args.getArgFloat("slowdown").getValue();
 		modelParameters.timeQuantum = (real_t)args.getArgFloat("time_quantum").getValue();
 
+		//IProgramPotential<real_t, index_t, length_t> *program = new ProgramPotential<real_t, index_t, length_t>;
+		IProgramPotential<real_t, index_t, length_t> *program = new SerialSimulator<real_t, index_t, length_t>(
+			graph.pointCount(), graph.getEdges(), graph.getLengths(), modelParameters);
+
 		// Set all necessary parameters of the program.
 		program->preinitialize(modelParameters, verbose);
+
 
 
 		/*
