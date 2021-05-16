@@ -3,6 +3,7 @@
 
 constexpr index_t blockSize = 256;
 
+/*
 __global__ void computeRepulsiveForces(
 	const index_t pointsCount,
 	const point_t *cuPoints,
@@ -14,10 +15,8 @@ __global__ void computeRepulsiveForces(
 		return;
 	}
 
-	//printf("compute_repulsive_forces for points %d\n", p1);
-
 	const point_t point = cuPoints[p1];
-	for (index_t p2 = p1 + 1; p2 < pointsCount; ++p2) {
+	for (index_t p2 = 0; p2 < pointsCount; ++p2) {
 		real_t dx = (real_t)point.x - (real_t)cuPoints[p2].x;
 		real_t dy = (real_t)point.y - (real_t)cuPoints[p2].y;
 		const real_t sqLen = max(dx*dx + dy*dy, (real_t)0.0001);
@@ -26,17 +25,6 @@ __global__ void computeRepulsiveForces(
 		dy *= fact;
 		cuForces[p1].x += dx;
 		cuForces[p1].y += dy;
-		cuForces[p2].x -= dx;
-		cuForces[p2].y -= dy;
-
-		//if (p1 == 1 || p2 == 1) {
-		//	printf("compute_repulsive_forces for points %d and %d \t distance[%f, %f] \t dforces[%f, %f]\n",
-		//		p1, p2,
-		//		(real_t)point.x - (real_t)cuPoints[p2].x, 
-		//		(real_t)point.y - (real_t)cuPoints[p2].y, 
-		//		dx, dy
-		//	);
-		//}
 	}
 }
 
@@ -72,14 +60,6 @@ __global__ void computeCompulsiveForces(
 		dy *= fact;
 		cuForces[pointIdx].x -= dx;
 		cuForces[pointIdx].y -= dy;
-
-		//if (pointIdx == 0 || pointIdx == 31) {
-		//	printf("compute_compulsive_force for %d %d \t dforces[%f, %f] \t cforces[%f, %f]\n",
-		//		pointIdx, neighbor.neighborIdx,
-		//		dx, dy,
-		//		cuForces[pointIdx].x, cuForces[pointIdx].y
-		//	);
-		//}
 	}
 }
 
@@ -102,15 +82,6 @@ __global__ void computeVelocitiesAndPositions(
 	coord_t resultForceX = compulsiveForce.x + repulsiveForce.x;
 	coord_t resultForceY = compulsiveForce.y + repulsiveForce.y;
 
-	if (pointIdx == 13) {
-		printf("computeVelocitiesAndPositions: point %d rf(%f, %f) cf(%f, %f) f(%f, %f)\n",
-			pointIdx,
-			repulsiveForce.x, repulsiveForce.y,
-			compulsiveForce.x, compulsiveForce.y,
-			resultForceX, resultForceY
-		);
-	}
-
 	// Compute velocities (requiered by getVelocities)
 	real_t fact = params.timeQuantum / params.vertexMass;	// v = Ft/m  => t/m is mul factor for F.
 	cuVelocities[pointIdx].x = (cuVelocities[pointIdx].x + resultForceX * fact) * params.slowdown;
@@ -126,58 +97,130 @@ __global__ void computeVelocitiesAndPositions(
 	compulsiveForce.x = 0;
 	compulsiveForce.y = 0;
 }
+*/
 
-void runComputeRepulsiveForces(
-	const index_t pointsCount,
-	const point_t *cuPoints,
+__device__
+void computeForcesInRow(
+	const index_t rowIdx,
 	const params_t params,
-	point_t *cuRepulsiveForces)
+	const point_t *cuPoints,
+	MatrixNode **cuGraph)
+{
+	const point_t point = cuPoints[rowIdx];
+	for (index_t colIdx = 0; colIdx < rowIdx; ++colIdx) {
+		const real_t dx =  cuPoints[colIdx].x - point.x;
+		const real_t dy =  cuPoints[colIdx].y - point.y;
+		const real_t sqLen = max(dx * dx + dy * dy, (real_t)0.0001);
+
+		const real_t repulsiveFact = params.vertexRepulsion / (sqLen * (real_t)std::sqrt(sqLen));
+
+		MatrixNode &node = cuGraph[rowIdx][colIdx];
+		node.dforce.x = dx * repulsiveFact;
+		node.dforce.y = dy * repulsiveFact;
+
+		if (node.edgeLength) { // if has edge
+			const real_t compulsiveFact = (real_t)std::sqrt(sqLen) * params.edgeCompulsion / (real_t)node.edgeLength;
+			node.dforce.x -= dx * compulsiveFact;
+			node.dforce.y -= dy * compulsiveFact;
+		}
+	}
+}
+
+__global__
+void computeForces(
+	const index_t pointsCount,
+	const params_t params,
+	const point_t *cuPoints,
+	MatrixNode **cuGraph)
+{
+	const index_t rowIdx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (rowIdx >= pointsCount) {
+		return;
+	}
+
+	computeForcesInRow(rowIdx, params, cuPoints, cuGraph);
+}
+
+void runComputeForces(
+	const index_t pointsCount,
+	const params_t params,
+	const point_t *cuPoints,
+	MatrixNode **cuGraph)
 {
 	const index_t blockCount = (pointsCount + blockSize - 1) / blockSize;
-	computeRepulsiveForces<<<blockCount, blockSize>>>(
+	computeForces<<<blockCount, blockSize>>>(
 		pointsCount,
-		cuPoints,
 		params,
-		cuRepulsiveForces
+		cuPoints,
+		cuGraph
 	);
 }
 
-
-void runComputeCompulsiveForces(
+__global__
+void computePositions(
 	const index_t pointsCount,
-	const index_t neighborsCount,
-	const point_t *cuPoints,
-	const neighbor_t *cuNeighbors,
-	const index_t *cuNeighborsStart,
 	const params_t params,
-	point_t *cuCompulsiveForces)
+	MatrixNode **cuGraph,
+	point_t *cuVelocities,
+	point_t *cuPoints)
 {
-	const index_t blockCount = (pointsCount + blockSize - 1) / blockSize;
-	computeCompulsiveForces<<<blockCount, blockSize>>>(
-		pointsCount,
-		neighborsCount,
-		cuPoints,
-		cuNeighbors,
-		cuNeighborsStart,
-		params,
-		cuCompulsiveForces
-	);
+	const index_t pointIdx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (pointIdx >= pointsCount) {
+		return;
+	}
+
+	const bool print = false; // pointIdx < 5;
+
+	// Accumulate resulting force
+	coord_t forceX = 0;
+	coord_t forceY = 0;
+
+	// First go in rows (cache friendly)
+	const index_t rowSize = pointIdx;
+	for (index_t colIdx = 0; colIdx < rowSize; ++colIdx) {
+		forceX -= cuGraph[pointIdx][colIdx].dforce.x;
+		forceY -= cuGraph[pointIdx][colIdx].dforce.y;
+
+		//if (print)
+		//printf("[%d, %d] dforce(%f, %f)\n",
+		//	pointIdx, colIdx, cuGraph[pointIdx][colIdx].dforce.x, cuGraph[pointIdx][colIdx].dforce.y);
+	}
+
+	// Then go in columns (cache un-friendly)
+	for (index_t rowIdx = pointIdx + 1; rowIdx < pointsCount; ++rowIdx) {
+		forceX += cuGraph[rowIdx][pointIdx].dforce.x;
+		forceY += cuGraph[rowIdx][pointIdx].dforce.y;
+
+		//if (print)
+		//printf("[%d, %d] dforce(%f, %f)\n",
+		//	rowIdx, pointIdx, cuGraph[rowIdx][pointIdx].dforce.x, cuGraph[rowIdx][pointIdx].dforce.y);
+	}
+
+	if (print)
+	printf("cuda[%d] force(%f, %f)\n", pointIdx, forceX, forceY);
+
+	// Update velocities
+	const real_t fact = params.timeQuantum / params.vertexMass;	// v = Ft/m  => t/m is mul factor for F.
+	cuVelocities[pointIdx].x = (cuVelocities[pointIdx].x + forceX * fact) * params.slowdown;
+	cuVelocities[pointIdx].y = (cuVelocities[pointIdx].y + forceY * fact) * params.slowdown;
+
+	// Compute new positions
+	cuPoints[pointIdx].x += cuVelocities[pointIdx].x * params.timeQuantum;
+	cuPoints[pointIdx].y += cuVelocities[pointIdx].y * params.timeQuantum;
 }
 
-void runComputeVelocitiesAndPositions(
+void runComputePositions(
 	const index_t pointsCount,
 	const params_t params,
-	point_t *cuRepulsiveForces,
-	point_t *cuCompulsiveForces,
+	MatrixNode **cuGraph,
 	point_t *cuVelocities,
 	point_t *cuPoints)
 {
 	const index_t blockCount = (pointsCount + blockSize - 1) / blockSize;
-	computeVelocitiesAndPositions<<<blockCount, blockSize>>>(
+	computePositions<<<blockCount, blockSize>>>(
 		pointsCount,
 		params,
-		cuRepulsiveForces,
-		cuCompulsiveForces,
+		cuGraph,
 		cuVelocities,
 		cuPoints
 	);

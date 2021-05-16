@@ -28,18 +28,11 @@ public:
 
 private:
 	index_t pointsCount{};
-	index_t neighborsCount{};
 	index_t iterationsCount{};
 	index_t iterationCurrent{};
 
 	point_t *cuPoints{};
-	index_t *cuEgdeStart{}; // effectively const
-	neighbor_t *cuNeighbors{}; // effectively const
-	index_t *cuNeighborsStart{}; // effectively const
-	length_t *cuLengths{}; // effectively const
-
-	point_t *cuRepulsiveForces{};
-	point_t *cuCompulsiveForces{};
+	MatrixNode **cuGraph{};
 	point_t *cuVelocities{};
 
 public:
@@ -49,72 +42,56 @@ public:
 		this->iterationsCount = iterations;
 		this->iterationCurrent = 0;
 
-		// Place egdes in a different structure - vector where each edge has its neighbors one after another.
-		// Since the vector is continuous in order to know where neighbors of "next in line" start we keep
-		// a separate vector that keeps information about how many points an egde is connected to".
-		//
-		// For example: for edges (0, 1); (0, 2); (1, 2):
-		// Continuous neighbors vector (semicolons represent where neighbors of next point in line begin):
-		// ;1, 2; 0, 2; 0, 2
-		// 0    1     2
-		// In order to store these points keep a separate array edgesStart: 0, 2, 5
-		// This vector has size 2 * neighborsCount. However the size is equal since to edges vector contain edge_t type
-		// Of course there is additional vector of neighbors start indices of size pointsCount * sizeof(index_t)
-		
-		// Count number of edges connected to each node
-		std::vector<std::vector<neighbor_t>> neighborsList;
-		neighborsList.resize(pointsCount);
-		for (index_t i = 0; i < edges.size(); ++i) {
-			neighborsList[edges[i].p1].emplace_back(edges[i].p2, lengths[i]);
-			neighborsList[edges[i].p2].emplace_back(edges[i].p1, lengths[i]);
+		std::size_t size = 0;
+
+		// Prepare the graph matrix
+		std::vector<std::vector<MatrixNode>> graph;
+		graph.resize(pointsCount);
+		for (index_t rowIdx = 1; rowIdx < pointsCount; ++rowIdx) {
+			index_t rowSize = rowIdx;
+			graph[rowIdx].resize(rowSize);
 		}
 
-		// Sort the neighbor list to hopefully get better caching on the GPU
-		for (auto &neighbors : neighborsList) {
-			std::sort(neighbors.begin(), neighbors.end(),
-				[](const neighbor_t &n1, const neighbor_t &n2) -> bool {
-					return n1.neighborIdx < n2.neighborIdx;
-				}
-			);
+		for (std::size_t edgeIdx = 0; edgeIdx < edges.size(); ++edgeIdx) {
+			auto &edge = edges[edgeIdx];
+			auto p1 = std::max(edge.p1, edge.p2);
+			auto p2 = std::min(edge.p1, edge.p2);
+			graph[p1][p2].edgeLength = lengths[edgeIdx];
 		}
-
-		// These are thementioned structures that we will copy to GPU
-		std::vector<neighbor_t> neighborsListFlat(edges.size() * 2);
-		std::vector<index_t> neighborsStart(pointsCount);
-
-		index_t neighborsStartIdx = 0;
-		for (index_t i = 0; i < neighborsList.size(); ++i) {
-			neighborsStart[i] = neighborsStartIdx;
-			for (index_t neighborIdx = 0; neighborIdx < neighborsList[i].size(); ++neighborIdx) {
-				neighborsListFlat[neighborsStartIdx + neighborIdx] = neighborsList[i][neighborIdx];
-			}
-			neighborsStartIdx += neighborsList[i].size();
-		}
-
-		this->neighborsCount = edges.size() * 2;
-		assert(neighborsStartIdx == neighborsCount);
-		assert(neighborsStart.size() == pointsCount);
 
 		CUCH(cudaSetDevice(0));
 
-		// Allocate memory for inputs
 		CUCH(cudaMalloc(&cuPoints, pointsCount * sizeof(*cuPoints)));
-		CUCH(cudaMalloc(&cuNeighbors, neighborsCount * sizeof(*cuNeighbors)));
-		CUCH(cudaMalloc(&cuNeighborsStart, pointsCount * sizeof(*cuNeighborsStart)));
+		printf("cuPoints: %lu\n", pointsCount * sizeof(*cuPoints));
+		size += pointsCount * sizeof(*cuPoints);
 
-		// Copy effectively const data
-		CUCH(cudaMemcpy(cuNeighbors, neighborsListFlat.data(), neighborsCount * sizeof(*cuNeighbors), cudaMemcpyHostToDevice));
-		CUCH(cudaMemcpy(cuNeighborsStart, neighborsStart.data(), pointsCount * sizeof(*cuNeighborsStart), cudaMemcpyHostToDevice));
+		// Move graph to cuGraph
+		// First create a host vector of cu pointers
+		std::vector<MatrixNode *> graphRowCuPointers(pointsCount);
+		for (index_t rowIdx = 0; rowIdx < pointsCount; ++rowIdx) {
+			index_t rowSize = rowIdx;
+			CUCH(cudaMalloc(&graphRowCuPointers[rowIdx], rowSize * sizeof(MatrixNode)));
+			CUCH(cudaMemcpy(graphRowCuPointers[rowIdx], graph[rowIdx].data(), rowSize * sizeof(MatrixNode),
+					cudaMemcpyHostToDevice));
+			printf("cuGraph[%u]: %lu\n", rowIdx, rowSize * sizeof(MatrixNode));
+			size += rowSize * sizeof(MatrixNode);
+		}
 
-		// Allocate temporary computational arrays
-		CUCH(cudaMalloc(&cuRepulsiveForces, pointsCount * sizeof(*cuRepulsiveForces)));
-		CUCH(cudaMalloc(&cuCompulsiveForces, pointsCount * sizeof(*cuCompulsiveForces)));
+		// Then allocate a vector that holds these pointers and copy preallocated cuda pointers to it
+		CUCH(cudaMalloc(&cuGraph, pointsCount * sizeof(*cuGraph)));
+		CUCH(cudaMemcpy(cuGraph, graphRowCuPointers.data(), pointsCount * sizeof(*cuGraph),
+				cudaMemcpyHostToDevice));
+
+		printf("cuGraph: %lu\n", pointsCount * sizeof(*cuGraph));
+		size += pointsCount * sizeof(*cuGraph);
+
+		// Additionaly allocate temporary help fields for velocity
 		CUCH(cudaMalloc(&cuVelocities, pointsCount * sizeof(*cuVelocities)));
+		CUCH(cudaMemset(cuVelocities, (real_t)0.0, pointsCount * sizeof(*cuVelocities)));
 
-		// Memset temporary arrays to 0
-		CUCH(cudaMemset(cuRepulsiveForces, 0, pointsCount * sizeof(*cuRepulsiveForces)));
-		CUCH(cudaMemset(cuCompulsiveForces, 0, pointsCount * sizeof(*cuCompulsiveForces)));
-		CUCH(cudaMemset(cuVelocities, 0, pointsCount * sizeof(*cuVelocities)));
+		printf("cuVelocities: %lu\n", pointsCount * sizeof(*cuVelocities));
+		size += pointsCount * sizeof(*cuVelocities);
+		printf("TOTAL SIZE: %lu B\n", size);
 	}
 
 
@@ -132,34 +109,19 @@ public:
 		++iterationCurrent;
 
 
-		runComputeRepulsiveForces(
+		runComputeForces(
 			pointsCount,
-			cuPoints,
 			this->mParams,
-			cuRepulsiveForces
+			cuPoints,
+			cuGraph
 		);
 		CUCH(cudaGetLastError());
-
 		CUCH(cudaDeviceSynchronize());
 
-		runComputeCompulsiveForces(
-			pointsCount,
-			neighborsCount,
-			cuPoints,
-			cuNeighbors,
-			cuNeighborsStart,
-			this->mParams,
-			cuCompulsiveForces
-		);
-		CUCH(cudaGetLastError());
-
-		CUCH(cudaDeviceSynchronize());
-
-		runComputeVelocitiesAndPositions(
+		runComputePositions(
 			pointsCount,
 			this->mParams,
-			cuRepulsiveForces,
-			cuCompulsiveForces,
+			cuGraph,
 			cuVelocities,
 			cuPoints
 		);
