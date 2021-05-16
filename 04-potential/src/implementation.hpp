@@ -32,14 +32,11 @@ private:
 	index_t iterationsCount{};
 	index_t iterationCurrent{};
 
-	point_t *cuPoints{};
-	index_t *cuEgdeStart{}; // effectively const
+	point_t *cuPoints1{};
+	point_t *cuPoints2{};
 	neighbor_t *cuNeighbors{}; // effectively const
 	index_t *cuNeighborsStart{}; // effectively const
-	length_t *cuLengths{}; // effectively const
 
-	point_t *cuRepulsiveForces{};
-	point_t *cuCompulsiveForces{};
 	point_t *cuVelocities{};
 
 public:
@@ -69,7 +66,7 @@ public:
 			neighborsList[edges[i].p2].emplace_back(edges[i].p1, lengths[i]);
 		}
 
-		// Sort the neighbor list to hopefully get better caching on the GPU
+		// Sort the neighbor list
 		for (auto &neighbors : neighborsList) {
 			std::sort(neighbors.begin(), neighbors.end(),
 				[](const neighbor_t &n1, const neighbor_t &n2) -> bool {
@@ -78,9 +75,9 @@ public:
 			);
 		}
 
-		// These are thementioned structures that we will copy to GPU
+		// These are the mentioned structures that we will copy to GPU
 		std::vector<neighbor_t> neighborsListFlat(edges.size() * 2);
-		std::vector<index_t> neighborsStart(pointsCount);
+		std::vector<index_t> neighborsStart(pointsCount + 1);
 
 		index_t neighborsStartIdx = 0;
 		for (index_t i = 0; i < neighborsList.size(); ++i) {
@@ -90,30 +87,26 @@ public:
 			}
 			neighborsStartIdx += neighborsList[i].size();
 		}
-
 		this->neighborsCount = edges.size() * 2;
 		assert(neighborsStartIdx == neighborsCount);
-		assert(neighborsStart.size() == pointsCount);
 
+		neighborsStart[pointsCount] = neighborsCount; // neighborsStart[pointsCount - 1] will have and at neighborsStart[pointsCount]
+
+		// Allocate memory on the device
 		CUCH(cudaSetDevice(0));
 
-		// Allocate memory for inputs
-		CUCH(cudaMalloc(&cuPoints, pointsCount * sizeof(*cuPoints)));
+		CUCH(cudaMalloc(&cuPoints1, pointsCount * sizeof(*cuPoints1)));
+		CUCH(cudaMalloc(&cuPoints2, pointsCount * sizeof(*cuPoints2)));
+
 		CUCH(cudaMalloc(&cuNeighbors, neighborsCount * sizeof(*cuNeighbors)));
-		CUCH(cudaMalloc(&cuNeighborsStart, pointsCount * sizeof(*cuNeighborsStart)));
+		CUCH(cudaMemcpy(cuNeighbors, neighborsListFlat.data(), neighborsCount * sizeof(*cuNeighbors),
+				cudaMemcpyHostToDevice));
 
-		// Copy effectively const data
-		CUCH(cudaMemcpy(cuNeighbors, neighborsListFlat.data(), neighborsCount * sizeof(*cuNeighbors), cudaMemcpyHostToDevice));
-		CUCH(cudaMemcpy(cuNeighborsStart, neighborsStart.data(), pointsCount * sizeof(*cuNeighborsStart), cudaMemcpyHostToDevice));
+		CUCH(cudaMalloc(&cuNeighborsStart, neighborsStart.size() * sizeof(*cuNeighborsStart)));
+		CUCH(cudaMemcpy(cuNeighborsStart, neighborsStart.data(), neighborsStart.size() * sizeof(*cuNeighborsStart),
+				cudaMemcpyHostToDevice));
 
-		// Allocate temporary computational arrays
-		CUCH(cudaMalloc(&cuRepulsiveForces, pointsCount * sizeof(*cuRepulsiveForces)));
-		CUCH(cudaMalloc(&cuCompulsiveForces, pointsCount * sizeof(*cuCompulsiveForces)));
 		CUCH(cudaMalloc(&cuVelocities, pointsCount * sizeof(*cuVelocities)));
-
-		// Memset temporary arrays to 0
-		CUCH(cudaMemset(cuRepulsiveForces, 0, pointsCount * sizeof(*cuRepulsiveForces)));
-		CUCH(cudaMemset(cuCompulsiveForces, 0, pointsCount * sizeof(*cuCompulsiveForces)));
 		CUCH(cudaMemset(cuVelocities, 0, pointsCount * sizeof(*cuVelocities)));
 	}
 
@@ -127,45 +120,35 @@ public:
 		assert(iterationCurrent < iterationsCount);
 
 		if (iterationCurrent == 0) {
-			CUCH(cudaMemcpy(cuPoints, points.data(), pointsCount * sizeof(*cuPoints), cudaMemcpyHostToDevice));
+			CUCH(cudaMemcpy(cuPoints1, points.data(), pointsCount * sizeof(*cuPoints1), cudaMemcpyHostToDevice));
 		}
-		++iterationCurrent;
 
+		point_t *cuPointsOld{};
+		point_t *cuPointsNew{};
 
-		runComputeRepulsiveForces(
-			pointsCount,
-			cuPoints,
+		if (iterationCurrent % 2) {
+			cuPointsOld = cuPoints2;
+			cuPointsNew = cuPoints1;
+		} else {
+			cuPointsOld = cuPoints1;
+			cuPointsNew = cuPoints2;
+		}
+
+		runComputePositions(
 			this->mParams,
-			cuRepulsiveForces
-		);
-		CUCH(cudaGetLastError());
-
-		CUCH(cudaDeviceSynchronize());
-
-		runComputeCompulsiveForces(
+			cuPointsOld,
 			pointsCount,
-			neighborsCount,
-			cuPoints,
 			cuNeighbors,
 			cuNeighborsStart,
-			this->mParams,
-			cuCompulsiveForces
-		);
-		CUCH(cudaGetLastError());
-
-		CUCH(cudaDeviceSynchronize());
-
-		runComputeVelocitiesAndPositions(
-			pointsCount,
-			this->mParams,
-			cuRepulsiveForces,
-			cuCompulsiveForces,
+			neighborsCount,
 			cuVelocities,
-			cuPoints
+			cuPointsNew
 		);
 		CUCH(cudaGetLastError());
 
-		CUCH(cudaMemcpy(points.data(), cuPoints, pointsCount * sizeof(*cuPoints), cudaMemcpyDeviceToHost));
+		CUCH(cudaMemcpy(points.data(), cuPointsNew, pointsCount * sizeof(*cuPointsNew), cudaMemcpyDeviceToHost));
+
+		++iterationCurrent;
 	}
 
 

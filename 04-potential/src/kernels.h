@@ -16,6 +16,7 @@ using point_t = Point<coord_t>;
 using edge_t = Edge<index_t>;
 using params_t = ModelParameters<real_t>;
 
+
 struct neighbor_t
 {
 	index_t neighborIdx;
@@ -28,7 +29,6 @@ struct neighbor_t
 		, length(length)
 	{}
 };
-
 
 
 /**
@@ -85,31 +85,15 @@ inline void _cuda_check(cudaError_t status, int line, const char *srcFile, const
  * Kernel wrapper declarations.
  */
 
-void runComputeRepulsiveForces(
-	const index_t pointsCount,
-	const point_t *cuPoints,
+void runComputePositions(
 	const params_t params,
-	point_t *cuRepulsiveForces
-);
-
-
-void runComputeCompulsiveForces(
+	const point_t *cuPointsOld,
 	const index_t pointsCount,
-	const index_t neighborsCount,
-	const point_t *cuPoints,
 	const neighbor_t *cuNeighbors,
 	const index_t *cuNeighborsStart,
-	const params_t params,
-	point_t *cuCompulsiveForces
-);
-
-void runComputeVelocitiesAndPositions(
-	const index_t pointsCount,
-	const params_t params,
-	point_t *cuRepulsiveForces,
-	point_t *cuCompulsiveForces,
+	const index_t neighborsCount,
 	point_t *cuVelocities,
-	point_t *cuPoints
+	point_t *cuPointsNew
 );
 
 #endif
